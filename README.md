@@ -1,4 +1,6 @@
-# perception-floor
+# blindsight
+
+*Blindsight, in neurology, is responding correctly to something you cannot see.*
 
 What does a policy that never looks at the screen score on a computer-use
 benchmark?
