@@ -1,6 +1,6 @@
-# blindsight
+# freeride
 
-**How much of a computer-use benchmark can you pass without doing the hard part?**
+**How much of a computer-use benchmark do models get for free?**
 
 When people report that a web agent picks the right button 42% of the time, that
 number sounds like it measures seeing and understanding. This repo checks. It
@@ -10,15 +10,17 @@ removes the model entirely, and measures what is still solvable.
 The answer is: a lot. On the standard benchmark, **five of the seven published
 systems score at or below a rule that never looks at the page.**
 
-Two questions, one method.
+Two questions, one method. Both halves matter and neither is a footnote to the
+other.
 
-| | the thing removed | what is left |
-|---|---|---|
-| [`floor.py`](floor.py) | the screenshot, the instruction, the model | position on the page |
-| [`foresight.py`](foresight.py) | the instruction, the model | what the person did so far |
+| | what is taken away | what is left | the setting |
+|---|---|---|---|
+| [`screen.py`](screen.py) | the screenshot, the instruction, the model | where things sit on the page | an agent told what to do |
+| [`intent.py`](intent.py) | the instruction, the model | what the person has done so far | an assistant that has to guess |
 
-The second one is the setting a proactive assistant is in: it watches you work
-and has to guess what you want before you say it.
+The second is the harder one and it is where products actually live: a system
+that watches you work and has to decide when to speak before you have said
+anything.
 
 ---
 
@@ -85,7 +87,7 @@ setting sit against a ceiling of 90.8%, not 100%.
 
 ## The second question: can it guess what you want?
 
-`foresight.py` asks the version of this that a proactive assistant faces. Nobody
+`intent.py` asks the version of this that a proactive assistant faces. Nobody
 tells it the task. It watches someone work and has to decide two things: **when
 to speak up**, and **what to do if it does**.
 
@@ -157,10 +159,10 @@ never 100% useful.
 pip install duckdb            # the only dependency
 ./fetch.sh                    # the data and the published scores (~3.9 GB)
 
-python floor.py --xenc data/scores_all_data.pkl --compare
-python floor.py --xenc data/scores_all_data.pkl --sweep 500,100,50,10,1
-python foresight.py --curve
-python floor.py --selftest && python foresight.py --selftest
+python screen.py --xenc data/scores_all_data.pkl --compare
+python screen.py --xenc data/scores_all_data.pkl --sweep 500,100,50,10,1
+python intent.py --curve
+python screen.py --selftest && python intent.py --selftest
 ```
 
 No API key, no GPU, a few minutes of CPU. 53 tests.

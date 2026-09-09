@@ -20,9 +20,9 @@ there, so its score should collapse. If it does not, the mechanism is something
 other than text matching and this file is wrong about why.
 
     ./fetch.sh                      # the split, verified shard by shard
-    python floor.py                 # every policy, over every shard in data/
-    python floor.py --limit 400     # a fast pass while developing
-    python floor.py --selftest      # the scorer, on cases with known answers
+    python screen.py                 # every policy, over every shard in data/
+    python screen.py --limit 400     # a fast pass while developing
+    python screen.py --selftest      # the scorer, on cases with known answers
 """
 from __future__ import annotations
 
@@ -606,7 +606,7 @@ def selftest() -> int:
     # Loading real scores must actually change the ordering. A path that silently
     # falls through to the text stand-in would report the stand-in's numbers
     # under the real ranker's name, which is the worst failure available here.
-    # NOT `import floor`: run as a script this module is __main__, so importing
+    # NOT `import screen`: run as a script this module is __main__, so importing
     # it by name binds a second copy and the assignment below lands on the one
     # `_ranked` is not reading. globals() is the module actually executing.
     _g = globals()

@@ -1,6 +1,6 @@
 """When should a proactive assistant offer to finish what you started?
 
-The second half of this repo. `floor.py` asks what a web agent scores without
+The second half of this repo. `screen.py` asks what a web agent scores without
 seeing the screen. This asks what it scores without being told the task at all,
 which is the setting a system that watches you work is actually in.
 
@@ -28,9 +28,9 @@ looks excellent under "actions saved" alone, so saving is reported against
 interruptions caused, and the tradeoff between them is the output of this repo.
 
 Usage:
-    python foresight.py                  # the floors
-    python foresight.py --curve          # saved against interrupted, per policy
-    python foresight.py --selftest
+    python intent.py                  # the floors
+    python intent.py --curve          # saved against interrupted, per policy
+    python intent.py --selftest
 """
 import argparse
 import collections
