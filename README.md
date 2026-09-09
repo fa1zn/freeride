@@ -1,14 +1,19 @@
 # freeride
 
-**How much of a computer-use benchmark do models get for free?**
+**Can an agent work when nobody spells it out?**
 
-When people report that a web agent picks the right button 42% of the time, that
-number sounds like it measures seeing and understanding. This repo checks. It
-takes the same benchmark, deletes the screenshot, deletes the instruction,
-removes the model entirely, and measures what is still solvable.
+The bet behind every proactive assistant is that AI should be able to operate
+without people having to communicate everything explicitly. That is a claim you
+can test, and nobody had.
 
-The answer is: a lot. On the standard benchmark, **five of the seven published
-systems score at or below a rule that never looks at the page.**
+So: take the standard benchmark for computer-use agents and remove the explicit
+instruction. Then remove the screen. Then remove the model. Score what is still
+solvable at each step.
+
+Two answers came back. Taking the instruction away breaks it, which is the
+finding for the thesis. And the control, taking *everything* away, found
+something worse: **five of the seven published systems score at or below a rule
+that never looks at the page.**
 
 Two questions, one method. Both halves matter and neither is a footnote to the
 other.
