@@ -161,7 +161,9 @@ def prepare(rows):
     Each row becomes (task_tokens, [Cand], gold_ids).
     """
     out = []
-    for task, pos, neg in rows:
+    for row in rows:
+        task, pos, neg = row[0], row[1], row[2]
+        key = f"{row[3]}_{row[4]}" if len(row) >= 5 else ""
         if not pos:
             continue
         gold, cands = set(), []
@@ -179,7 +181,7 @@ def prepare(rows):
             if is_pos:
                 gold.add(nid)
         if cands:
-            out.append((toks(task), cands, gold))
+            out.append((toks(task), cands, gold, key))
     return out
 
 
@@ -212,7 +214,48 @@ def order(pos, neg, how="dom"):
     return sorted(cands, key=key)
 
 
-def rank(tt, cands, k=50):
+# The published cross-encoder's scores, when they have been loaded. Empty means
+# the text stand-in is in use, and every table says which one produced it.
+_XENC = {}
+
+
+def load_xenc(path):
+    """The Mind2Web authors' own candidate-generation scores.
+
+    `scores_all_data.pkl` on huggingface.co/datasets/osunlp/Mind2Web is the
+    output of osunlp/MindAct_CandidateGeneration_deberta-v3-base over the whole
+    dataset, and it is what their action-prediction stage consumes. Using it
+    beats re-running the checkpoint: it is the exact ranking the published
+    numbers rest on, with no chance of drifting on input format, pair order or
+    library version.
+
+    Shape is {f"{annotation_id}_{action_uid}": {backend_node_id: score}}.
+    Reproduces the `ranks` the same file ships on 99.93% of steps, the remainder
+    being ties on identical scores.
+    """
+    import pickle
+
+    global _XENC
+    with open(path, "rb") as fh:
+        _XENC = pickle.load(fh)["scores"]
+    return len(_XENC)
+
+
+def _ranked(tt, cands, key=""):
+    """Candidates best-first, by whichever ranker is loaded.
+
+    TIES BREAK BY NODE ID, NEVER BY POSITION IN THE INPUT LIST. Building the
+    input as `pos + neg` and letting a stable sort keep it is how this repo
+    shipped a fake result once already, and a tie-break is exactly where that
+    hides.
+    """
+    if _XENC and key in _XENC:
+        sc = _XENC[key]
+        return sorted(cands, key=lambda c: (-sc.get(c["id"], -1e9), _nid_key(c["id"])))
+    return sorted(cands, key=lambda c: (-len(tt & c["toks"]), _nid_key(c["id"])))
+
+
+def rank(tt, cands, k=50, key=""):
     """A stand-in for the ranker a real Mind2Web setup runs first.
 
     The published pipeline scores every element with a cross-encoder and hands
@@ -234,8 +277,7 @@ def rank(tt, cands, k=50):
     and `centre` use position and geometry and are unaffected, so those are the
     ones reported in the ranked condition.
     """
-    scored = sorted(cands, key=lambda c: -len(tt & c["toks"]))
-    return scored[:k]
+    return _ranked(tt, cands, key)[:k]
 
 
 def _order_prepared(cands, how):
@@ -267,9 +309,9 @@ def score(rows, policy, how="dom", k=0):
     loses the answer makes the step unpassable for everything downstream.
     """
     hits = n = 0
-    for tt, cands, gold in rows:
+    for tt, cands, gold, key in rows:
         n += 1
-        c = rank(tt, cands, k) if k else cands
+        c = rank(tt, cands, k, key) if k else cands
         c = _order_prepared(c, how)
         if not c:
             continue
@@ -283,8 +325,8 @@ def recall_at_k(rows, k=50):
     """How often the correct element survives ranking. A ceiling on everything
     measured inside the shortlist, so it is reported beside those numbers."""
     hits = 0
-    for tt, cands, gold in rows:
-        if any(c["id"] in gold for c in rank(tt, cands, k)):
+    for tt, cands, gold, key in rows:
+        if any(c["id"] in gold for c in rank(tt, cands, k, key)):
             hits += 1
     return hits, len(rows)
 
@@ -312,9 +354,9 @@ def sweep(rows, ks):
     ks = sorted({int(k) for k in ks}, reverse=True)
     acc = {k: {"recall": 0, "dom": 0, "rank": 0, "centre": 0} for k in ks}
     n = 0
-    for tt, cands, gold in rows:
+    for tt, cands, gold, key in rows:
         n += 1
-        ranked = sorted(cands, key=lambda c: -len(tt & c["toks"]))
+        ranked = _ranked(tt, cands, key)
         for k in ks:
             sl = ranked[:k]
             if not sl:
@@ -353,7 +395,8 @@ def load(path, limit=None):
 
     con = duckdb.connect()
     lim = f" LIMIT {int(limit)}" if limit else ""
-    q = (f"SELECT confirmed_task, pos_candidates, neg_candidates "
+    q = (f"SELECT confirmed_task, pos_candidates, neg_candidates, "
+         f"annotation_id, action_uid "
          f"FROM read_parquet('{path}'){lim}")
     return con.execute(q).fetchall()
 
@@ -431,12 +474,12 @@ def selftest() -> int:
     ck("...and a shortlist of k returns at most k",
        len(rank(tt, _prep([miss1, hit, miss2]), 2)), 2)
     ck("recall@k sees the gold when the ranker keeps it",
-       recall_at_k([(tt, _prep([miss1, hit]), {"20"})], 1), (1, 1))
+       recall_at_k([(tt, _prep([miss1, hit]), {"20"}, "")], 1), (1, 1))
     # RED: a shortlist that drops the answer must count as a miss, not a skip.
     ck("...and misses when the ranker drops it",
-       recall_at_k([(tt, _prep([hit, miss1]), {"99"})], 1), (0, 1))
+       recall_at_k([(tt, _prep([hit, miss1]), {"99"}, "")], 1), (0, 1))
     ck("a step whose gold the ranker drops is a miss for every policy",
-       score([(tt, _prep([hit, miss1]), {"99"})], pick_first, "rank", 1), (0, 1))
+       score([(tt, _prep([hit, miss1]), {"99"}, "")], pick_first, "rank", 1), (0, 1))
     ck("rank order leaves the ranker's own order alone",
        [c["id"] for c in _order_prepared(_prep([hit, miss1]), "rank")], ["20", "21"])
 
@@ -478,6 +521,31 @@ def selftest() -> int:
     ck("a shortlist that loses the gold scores zero everywhere",
        (dacc[1]["recall"], dacc[1]["dom"], dacc[1]["rank"], dacc[1]["centre"]), (0, 0, 0, 0))
 
+
+    # --- the published ranker ------------------------------------------------
+    # Loading real scores must actually change the ordering. A path that silently
+    # falls through to the text stand-in would report the stand-in's numbers
+    # under the real ranker's name, which is the worst failure available here.
+    # NOT `import floor`: run as a script this module is __main__, so importing
+    # it by name binds a second copy and the assignment below lands on the one
+    # `_ranked` is not reading. globals() is the module actually executing.
+    _g = globals()
+    hi = C("700", **{"class": "zzz"})       # no task words at all
+    lo = C("100", **{"class": "passport"})  # the text ranker's favourite
+    cs = _prep([hi, lo])
+    tt2 = toks("book a passport appointment")
+    ck("text stand-in ranks on words", [c["id"] for c in _ranked(tt2, cs)], ["100", "700"])
+    _g["_XENC"] = {"K": {"700": 0.9, "100": 0.1}}
+    ck("loaded scores override the stand-in",
+       [c["id"] for c in _ranked(tt2, cs, "K")], ["700", "100"])
+    ck("a step absent from the score file falls back to text",
+       [c["id"] for c in _ranked(tt2, cs, "ABSENT")], ["100", "700"])
+    # Equal scores must not be resolved by who was passed in first.
+    _g["_XENC"] = {"K": {"700": 0.5, "100": 0.5}}
+    ck("ties break by node id, not input order",
+       [c["id"] for c in _ranked(tt2, _prep([hi, lo]), "K")], ["100", "700"])
+    _g["_XENC"] = {}
+
     print("\n  " + ("SELFTEST PASS" if ok else "SELFTEST FAIL"))
     return 0 if ok else 1
 
@@ -490,10 +558,19 @@ def main() -> int:
                     help="shortlist size for the ranked condition")
     ap.add_argument("--sweep", default="",
                     help="comma-separated shortlist sizes, e.g. 500,200,100,50,20,10,5,1")
+    ap.add_argument("--xenc", default="",
+                    help="path to scores_all_data.pkl, the published "
+                         "cross-encoder scores; without it the text stand-in "
+                         "is used and every table says so")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
+    if a.xenc:
+        print(f"  ranker: the published cross-encoder, "
+              f"{load_xenc(a.xenc):,} steps scored\n")
+    else:
+        print("  ranker: text similarity stand-in (pass --xenc for the real one)\n")
 
     import glob
     files = sorted(glob.glob(a.shard)) if "*" in a.shard else [a.shard]

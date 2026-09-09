@@ -56,6 +56,29 @@ while read -r p || [ -n "$p" ]; do
     fi
 done < shards.txt
 
+# The published candidate-generation scores. Without this the ranked tables use
+# a bag-of-words stand-in, which answers the central question backwards, so this
+# is fetched by default rather than offered as an extra.
+SCORES="data/scores_all_data.pkl"
+if [ -s "$SCORES" ]; then
+    echo "  ok      scores_all_data.pkl"
+else
+    echo "  fetch   scores_all_data.pkl  (245 MB)"
+    if curl -fL --retry 5 --retry-delay 3 --retry-all-errors -C - -o "$SCORES.part" \
+            "https://huggingface.co/datasets/osunlp/Mind2Web/resolve/main/scores_all_data.pkl"; then
+        # A pickle that will not load is as useless as a truncated parquet, and
+        # the failure would surface as a wrong number rather than an error.
+        if "$PY" -c "import pickle,sys; d=pickle.load(open(sys.argv[1],'rb')); \
+                     assert 'scores' in d and len(d['scores'])>1000" "$SCORES.part" 2>/dev/null; then
+            mv "$SCORES.part" "$SCORES"; echo "  ok      scores_all_data.pkl"
+        else
+            echo "  REFUSED scores_all_data.pkl  (downloaded but will not load)"; fail=1
+        fi
+    else
+        echo "  DOWNLOAD INCOMPLETE, part kept for resume"; fail=1
+    fi
+fi
+
 n=$(ls data/test_domain-*.parquet 2>/dev/null | wc -l | tr -d ' ')
 echo
 echo "  $n readable shard(s) of $want listed"
