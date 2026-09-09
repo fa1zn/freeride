@@ -141,6 +141,14 @@ def pick_centre(tt, cands, vw=1280.0, vh=720.0):
 POLICIES = {"first": pick_first, "overlap": pick_overlap, "centre": pick_centre}
 
 
+def _nid_key(nid):
+    """Node id as a sort key. Ids that will not parse sort last, together."""
+    try:
+        return (0, int(nid))
+    except (TypeError, ValueError):
+        return (1, 0)
+
+
 def prepare(rows):
     """Parse each candidate exactly once.
 
@@ -157,7 +165,15 @@ def prepare(rows):
         if not pos:
             continue
         gold, cands = set(), []
-        for c, is_pos in [(c, True) for c in pos] + [(c, False) for c in neg]:
+        # ORDER BY NODE ID HERE, NOT LATER. This list is what `rank` sorts, and
+        # Python's sort is stable, so whatever sits at index 0 wins every tie on
+        # ranker score. Built as `pos + neg` that is the correct element, which
+        # hands the answer to the shortlist exactly the way `order` warns about.
+        # The downstream `_order_prepared(c, "dom")` re-sort cannot undo it: by
+        # then the biased tie-break has already decided who made the shortlist.
+        for c, is_pos in sorted(
+                [(c, True) for c in pos] + [(c, False) for c in neg],
+                key=lambda t: _nid_key(cand_id(t[0]))):
             nid = cand_id(c)
             cands.append({"id": nid, "toks": toks(cand_text(c)), "box": cand_box(c)})
             if is_pos:
@@ -273,6 +289,53 @@ def recall_at_k(rows, k=50):
     return hits, len(rows)
 
 
+
+def sweep(rows, ks):
+    """The floor as a function of shortlist size, with recall@k beside it.
+
+    The headline result rests on two points: 21.4% over the whole page and 31.4%
+    inside the top 50. Two points show a difference but not a mechanism. If the
+    claim is that a smaller shortlist concentrates a positional prior rather than
+    removing it, the floor should rise as k falls, peak, and then fall again once
+    the shortlist gets small enough to start dropping the answer. That shape is
+    the claim, and this measures it.
+
+    The ranked order is computed ONCE per step and then sliced. The top 30 is a
+    prefix of the top 50, so re-ranking per k would cost k times as much and
+    return the same rows.
+
+    `recall@k` falls with k and caps every policy below it, so it is reported in
+    the same table rather than in a footnote. A floor that rises while recall
+    collapses is not a stronger prior, it is a shortlist that has thrown the
+    answer away, and the two are only distinguishable side by side.
+    """
+    ks = sorted({int(k) for k in ks}, reverse=True)
+    acc = {k: {"recall": 0, "dom": 0, "rank": 0, "centre": 0} for k in ks}
+    n = 0
+    for tt, cands, gold in rows:
+        n += 1
+        ranked = sorted(cands, key=lambda c: -len(tt & c["toks"]))
+        for k in ks:
+            sl = ranked[:k]
+            if not sl:
+                continue
+            a = acc[k]
+            if any(c["id"] in gold for c in sl):
+                a["recall"] += 1
+            # `first` in document order: the prior, measured inside the shortlist.
+            dom = _order_prepared(sl, "dom")
+            if dom[0]["id"] in gold:
+                a["dom"] += 1
+            # `first` in rank order: taking the ranker's own top choice, which is
+            # the floor for any system built on a ranker at all.
+            if sl[0]["id"] in gold:
+                a["rank"] += 1
+            i = pick_centre(tt, dom)
+            if i is not None and dom[i]["id"] in gold:
+                a["centre"] += 1
+    return n, acc
+
+
 def score_raw(rows, policy, how="dom"):
     """Scoring straight off unparsed rows. Used only by the selftest, where the
     fixtures are three candidates rather than two million."""
@@ -381,6 +444,40 @@ def selftest() -> int:
        has_text([C("9", tag="div")]), False)
     ck("...and a labelled one does", has_text([a]), True)
 
+
+    # --- the shortlist sweep -------------------------------------------------
+    # A sweep is easy to get backwards, because every column moves at once and a
+    # rising floor next to a collapsing recall looks like a stronger result when
+    # it is a shortlist that has thrown the answer away. These pin the shape.
+    gold = C("40", **{"class": "passport"})
+    filler = [C(str(50 + i), **{"class": f"junk{i}"}) for i in range(6)]
+    swrows = prepare([("book a passport appointment", [gold], filler)])
+
+    n, acc = sweep(swrows, [1, 2, 7])
+    ck("sweep sees every step once", n, 1)
+    # Bigger shortlist can only keep more, never less.
+    ck("recall@k is monotone in k",
+       [acc[k]["recall"] for k in (1, 2, 7)], sorted(acc[k]["recall"] for k in (1, 2, 7)))
+    # One candidate means document order and rank order are the same list, so a
+    # disagreement here means the two columns are not measuring what they say.
+    ck("at k=1 dom order and rank order agree",
+       acc[1]["dom"] == acc[1]["rank"], True)
+    # The ranker puts the only task-matching element first, so k=1 keeps it.
+    ck("the ranker keeps the gold at k=1", acc[1]["recall"], 1)
+    # At k >= the candidate count the shortlist is the whole page, so the sweep
+    # must reproduce the unranked number rather than a ranked one.
+    ck("at k >= all candidates the sweep equals the unranked floor",
+       acc[7]["dom"], score(swrows, pick_first, "dom")[0])
+
+    # A shortlist that drops the answer is a miss in EVERY column, including the
+    # positional ones. Without this a small k looks like a high floor.
+    late = C("999", **{"class": "passport"})
+    lead = [C(str(i), **{"class": "junk"}) for i in range(1, 6)]
+    droprows = prepare([("zzz nothing matches", [late], lead)])
+    _, dacc = sweep(droprows, [1])
+    ck("a shortlist that loses the gold scores zero everywhere",
+       (dacc[1]["recall"], dacc[1]["dom"], dacc[1]["rank"], dacc[1]["centre"]), (0, 0, 0, 0))
+
     print("\n  " + ("SELFTEST PASS" if ok else "SELFTEST FAIL"))
     return 0 if ok else 1
 
@@ -391,6 +488,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--topk", type=int, default=50,
                     help="shortlist size for the ranked condition")
+    ap.add_argument("--sweep", default="",
+                    help="comma-separated shortlist sizes, e.g. 500,200,100,50,20,10,5,1")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -434,6 +533,23 @@ def main() -> int:
         fn = POLICIES[name]
         print(f"  {name:10} {f(*score(rows, fn, 'rank', k)):>18}   "
               f"{f(*score(rows, fn, 'dom', k)):>18}")
+
+    if a.sweep:
+        ks = [int(x) for x in a.sweep.split(",") if x.strip()]
+        n, acc = sweep(rows, ks)
+        print(f"\n  SHORTLIST SWEEP: the floor as the shortlist tightens, over {n:,} steps\n")
+        print(f"  {'k':>5} {'recall@k':>10} {'first (dom)':>13} {'first (rank)':>13} "
+              f"{'centre':>9}")
+        pk, pv = None, -1.0
+        for k in sorted(acc, reverse=True):
+            v = acc[k]
+            d = v["dom"] / n
+            if d > pv:
+                pv, pk = d, k
+            print(f"  {k:>5} {v['recall']/n:>9.1%} {d:>12.1%} "
+                  f"{v['rank']/n:>12.1%} {v['centre']/n:>8.1%}")
+        print(f"\n  first (dom) peaks at k={pk}: {pv:.1%}")
+        print("  recall@k in the same table because it caps every column beside it.")
 
     print(f"\n  text-labelled {len(lab):,} steps, no-text control {len(unl):,}")
     return 0
