@@ -196,7 +196,38 @@ def order(pos, neg, how="dom"):
     return sorted(cands, key=key)
 
 
+def rank(tt, cands, k=50):
+    """A stand-in for the ranker a real Mind2Web setup runs first.
+
+    The published pipeline scores every element with a cross-encoder and hands
+    the agent a top-k shortlist, so a floor measured over all 500 candidates
+    describes a task nobody actually evaluates. This approximates that stage
+    with text similarity to the task, which is the signal the cross-encoder is
+    trained to approximate, and keeps the top k.
+
+    Two things fall out and both matter:
+
+      recall@k   how often the correct element survives ranking at all. This is
+                 a ceiling on every downstream score, and it belongs next to any
+                 number measured inside the shortlist.
+      the floor  what a no-perception policy scores WITHIN the shortlist, which
+                 is the number a real system's floor actually is.
+
+    THE CIRCULARITY, NAMED. This ranker scores on text, so measuring the `overlap`
+    policy inside its own shortlist would be marking its own homework. `first`
+    and `centre` use position and geometry and are unaffected, so those are the
+    ones reported in the ranked condition.
+    """
+    scored = sorted(cands, key=lambda c: -len(tt & c["toks"]))
+    return scored[:k]
+
+
 def _order_prepared(cands, how):
+    # `rank` leaves the ranker's own ordering alone, so `first` becomes "take
+    # the ranker's top choice". That is the floor a real system carries, and it
+    # is a different question from document position.
+    if how == "rank":
+        return cands
     if how == "shuffle":
         import random
         c = list(cands)
@@ -211,16 +242,35 @@ def _order_prepared(cands, how):
     return sorted(cands, key=key)
 
 
-def score(rows, policy, how="dom"):
-    """(hits, n) over PREPARED rows. A step counts only if the pick is a positive."""
+def score(rows, policy, how="dom", k=0):
+    """(hits, n) over PREPARED rows. A step counts only if the pick is a positive.
+
+    `k` runs the ranker first and scores inside the top-k shortlist, which is
+    the setting a real system evaluates in. Steps whose gold element the ranker
+    drops still count as misses, because that is what they are: a shortlist that
+    loses the answer makes the step unpassable for everything downstream.
+    """
     hits = n = 0
     for tt, cands, gold in rows:
         n += 1
-        c = _order_prepared(cands, how)
+        c = rank(tt, cands, k) if k else cands
+        c = _order_prepared(c, how)
+        if not c:
+            continue
         i = policy(tt, c)
         if i is not None and c[i]["id"] in gold:
             hits += 1
     return hits, n
+
+
+def recall_at_k(rows, k=50):
+    """How often the correct element survives ranking. A ceiling on everything
+    measured inside the shortlist, so it is reported beside those numbers."""
+    hits = 0
+    for tt, cands, gold in rows:
+        if any(c["id"] in gold for c in rank(tt, cands, k)):
+            hits += 1
+    return hits, len(rows)
 
 
 def score_raw(rows, policy, how="dom"):
@@ -309,6 +359,24 @@ def selftest() -> int:
        [cand_id(c) for c in order([hi], [lo], "shuffle")]
        == [cand_id(c) for c in order([hi], [lo], "shuffle")], True)
 
+    # --- the ranking stage ------------------------------------------------
+    hit = C("20", **{"class": "passport appointment"})
+    miss1, miss2 = C("21", **{"class": "checkout"}), C("22", **{"class": "footer"})
+    tt = toks("book a passport appointment")
+    ck("the ranker keeps the candidate that matches the task",
+       [c["id"] for c in rank(tt, _prep([miss1, hit, miss2]), 1)], ["20"])
+    ck("...and a shortlist of k returns at most k",
+       len(rank(tt, _prep([miss1, hit, miss2]), 2)), 2)
+    ck("recall@k sees the gold when the ranker keeps it",
+       recall_at_k([(tt, _prep([miss1, hit]), {"20"})], 1), (1, 1))
+    # RED: a shortlist that drops the answer must count as a miss, not a skip.
+    ck("...and misses when the ranker drops it",
+       recall_at_k([(tt, _prep([hit, miss1]), {"99"})], 1), (0, 1))
+    ck("a step whose gold the ranker drops is a miss for every policy",
+       score([(tt, _prep([hit, miss1]), {"99"})], pick_first, "rank", 1), (0, 1))
+    ck("rank order leaves the ranker's own order alone",
+       [c["id"] for c in _order_prepared(_prep([hit, miss1]), "rank")], ["20", "21"])
+
     ck("no-text control: an icon-only element has nothing to match",
        has_text([C("9", tag="div")]), False)
     ck("...and a labelled one does", has_text([a]), True)
@@ -321,6 +389,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--shard", default=SHARD)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--topk", type=int, default=50,
+                    help="shortlist size for the ranked condition")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -342,6 +412,7 @@ def main() -> int:
     rows, lab, unl = prepare(rows), prepare(lab_raw), prepare(unl_raw)
     f = lambda h, n: f"{h/n:6.1%} ({h}/{n})" if n else "      n/a"
 
+    print("  UNRANKED: every element on the page\n")
     for how in ("dom", "shuffle"):
         print(f"  candidates in {how} order")
         print(f"  {'policy':10} {'all steps':>18}   {'text-labelled':>18}   "
@@ -351,7 +422,20 @@ def main() -> int:
                   f"{f(*score(lab, fn, how)):>18}   {f(*score(unl, fn, how)):>20}")
         print()
 
-    print(f"  text-labelled {len(lab):,} steps, no-text control {len(unl):,}")
+    # The setting a real system evaluates in: rank first, then act on a
+    # shortlist. `overlap` is omitted here because the ranker scores on text and
+    # would be grading its own shortlist.
+    k = a.topk
+    rh, rn = recall_at_k(rows, k)
+    print(f"  RANKED: the ranker's top {k}, which is where a real system acts")
+    print(f"  recall@{k}: {rh/rn:.1%} ({rh}/{rn})  <- ceiling on everything below\n")
+    print(f"  {'policy':10} {'in rank order':>18}   {'in dom order':>18}")
+    for name in ("first", "centre"):
+        fn = POLICIES[name]
+        print(f"  {name:10} {f(*score(rows, fn, 'rank', k)):>18}   "
+              f"{f(*score(rows, fn, 'dom', k)):>18}")
+
+    print(f"\n  text-labelled {len(lab):,} steps, no-text control {len(unl):,}")
     return 0
 
 
