@@ -19,7 +19,9 @@ label at all, only an icon or a bare div. `overlap` has nothing to match on
 there, so its score should collapse. If it does not, the mechanism is something
 other than text matching and this file is wrong about why.
 
-    python floor.py                 # every policy, on the shard in data/
+    ./fetch.sh                      # the split, verified shard by shard
+    python floor.py                 # every policy, over every shard in data/
+    python floor.py --limit 400     # a fast pass while developing
     python floor.py --selftest      # the scorer, on cases with known answers
 """
 from __future__ import annotations
@@ -31,7 +33,9 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SHARD = os.path.join(HERE, "data", "shard0.parquet")
+# Every shard of the split by default. One file is enough to develop against;
+# a number worth quoting is over all of them.
+SHARD = os.path.join(HERE, "data", "*.parquet")
 
 WORD = re.compile(r"[a-z0-9]+")
 # Words that appear in nearly every task and match nearly every element, so
@@ -107,35 +111,60 @@ def cand_id(c):
 # --------------------------------------------------------------------------
 # The policies. None of them sees a screenshot; none of them calls a model.
 # --------------------------------------------------------------------------
-def pick_first(task, cands):
+def pick_first(tt, cands):
     return 0 if cands else None
 
 
-def pick_overlap(task, cands):
-    t = toks(task)
-    if not t:
+def pick_overlap(tt, cands):
+    if not tt:
         return None
-    best, bi = -1, None
+    best, bi = 0, None
     for i, c in enumerate(cands):
-        n = len(t & toks(cand_text(c)))
+        n = len(tt & c["toks"])
         if n > best:
             best, bi = n, i
-    return bi if best > 0 else None
+    return bi
 
 
-def pick_centre(task, cands, vw=1280.0, vh=720.0):
+def pick_centre(tt, cands, vw=1280.0, vh=720.0):
     best, bi = None, None
     for i, c in enumerate(cands):
-        b = cand_box(c)
+        b = c["box"]
         if b is None:
             continue
-        d = ((b[0] - vw / 2) ** 2 + (b[1] - vh / 2) ** 2) ** 0.5
+        d = (b[0] - vw / 2) ** 2 + (b[1] - vh / 2) ** 2
         if best is None or d < best:
             best, bi = d, i
     return bi
 
 
 POLICIES = {"first": pick_first, "overlap": pick_overlap, "centre": pick_centre}
+
+
+def prepare(rows):
+    """Parse each candidate exactly once.
+
+    Every policy needs the same three things from a candidate: its id, its
+    label text, and its box. The first version derived them inside the scoring
+    loop, so a run over the full split re-parsed the same JSON eighteen times,
+    once per policy-subset-order combination, and did not finish. Parsing here
+    turns that into one pass.
+
+    Each row becomes (task_tokens, [Cand], gold_ids).
+    """
+    out = []
+    for task, pos, neg in rows:
+        if not pos:
+            continue
+        gold, cands = set(), []
+        for c, is_pos in [(c, True) for c in pos] + [(c, False) for c in neg]:
+            nid = cand_id(c)
+            cands.append({"id": nid, "toks": toks(cand_text(c)), "box": cand_box(c)})
+            if is_pos:
+                gold.add(nid)
+        if cands:
+            out.append((toks(task), cands, gold))
+    return out
 
 
 def order(pos, neg, how="dom"):
@@ -167,24 +196,46 @@ def order(pos, neg, how="dom"):
     return sorted(cands, key=key)
 
 
+def _order_prepared(cands, how):
+    if how == "shuffle":
+        import random
+        c = list(cands)
+        random.Random(0).shuffle(c)
+        return c
+
+    def key(c):
+        try:
+            return (0, int(c["id"]))
+        except (TypeError, ValueError):
+            return (1, 0)
+    return sorted(cands, key=key)
+
+
 def score(rows, policy, how="dom"):
-    """(hits, n). A step counts only if the chosen candidate is the positive."""
+    """(hits, n) over PREPARED rows. A step counts only if the pick is a positive."""
     hits = n = 0
-    for task, pos, neg in rows:
-        if not pos:
-            continue
-        cands = order(pos, neg, how)
-        if not cands:
-            continue
-        gold = {cand_id(c) for c in pos}
+    for tt, cands, gold in rows:
         n += 1
-        i = policy(task, cands)
-        if i is not None and cand_id(cands[i]) in gold:
+        c = _order_prepared(cands, how)
+        i = policy(tt, c)
+        if i is not None and c[i]["id"] in gold:
             hits += 1
     return hits, n
 
 
+def score_raw(rows, policy, how="dom"):
+    """Scoring straight off unparsed rows. Used only by the selftest, where the
+    fixtures are three candidates rather than two million."""
+    return score(prepare(rows), policy, how)
+
+
 def load(path, limit=None):
+    """Rows from one parquet file or a glob over the whole split.
+
+    The screenshot column is never selected. It is most of the 3.6 GB and no
+    policy here is allowed to look at it, so reading it would only make the run
+    slow and the claim weaker.
+    """
     import duckdb
 
     con = duckdb.connect()
@@ -197,6 +248,12 @@ def load(path, limit=None):
 def has_text(pos):
     """Does the correct element carry any text a matcher could use?"""
     return bool(toks(" ".join(cand_text(c) for c in pos)))
+
+
+def _prep(cands):
+    """Candidates in the shape the policies now take."""
+    return [{"id": cand_id(c), "toks": toks(cand_text(c)), "box": cand_box(c)}
+            for c in cands]
 
 
 def selftest() -> int:
@@ -219,25 +276,25 @@ def selftest() -> int:
     a = C("1", role="menuitem", **{"class": "passport-link"})
     b = C("2", role="button", **{"class": "checkout"})
     ck("overlap picks the candidate sharing a task word",
-       pick_overlap("book a passport appointment", [b, a]), 1)
+       pick_overlap(toks("book a passport appointment"), _prep([b, a])), 1)
     # A policy that guesses when nothing matches inflates its own floor.
     ck("overlap abstains when nothing overlaps",
-       pick_overlap("book a passport appointment", [b]), None)
+       pick_overlap(toks("book a passport appointment"), _prep([b])), None)
 
     far = C("3", bounding_box_rect="0,0,10,10")
     near = C("4", bounding_box_rect="620,340,40,40")
     ck("centre picks the box nearest the viewport middle",
-       pick_centre("t", [far, near]), 1)
+       pick_centre(toks("t"), _prep([far, near])), 1)
     ck("centre ignores candidates with no geometry",
-       pick_centre("t", [C("5"), near]), 1)
+       pick_centre(toks("t"), _prep([C("5"), near])), 1)
     ck("centre abstains when nothing has geometry",
-       pick_centre("t", [C("6"), C("7")]), None)
+       pick_centre(toks("t"), _prep([C("6"), C("7")])), None)
 
     # Scoring: a hit is the POSITIVE's id, not its position.
     rows = [("book a passport appointment", [a], [b])]
-    ck("a correct pick scores", score(rows, pick_overlap), (1, 1))
+    ck("a correct pick scores", score_raw(rows, pick_overlap), (1, 1))
     ck("an abstention is a miss, never a skip",
-       score([("zzz", [C("8", **{"class": "nothing"})], [])], pick_overlap), (0, 1))
+       score_raw([("zzz", [C("8", **{"class": "nothing"})], [])], pick_overlap), (0, 1))
 
     # RED: the harness must not hand the answer to a position policy. The first
     # version returned pos + neg, so `first` scored 100% on every benchmark it
@@ -246,8 +303,8 @@ def selftest() -> int:
     ck("candidates are ordered by node id, not positives-first",
        [cand_id(c) for c in order([hi], [lo])], ["10", "900"])
     ck("...so `first` misses when the positive is late in the DOM",
-       score([("t", [hi], [lo])], pick_first), (0, 1))
-    ck("...and hits when it is early", score([("t", [lo], [hi])], pick_first), (1, 1))
+       score_raw([("t", [hi], [lo])], pick_first), (0, 1))
+    ck("...and hits when it is early", score_raw([("t", [lo], [hi])], pick_first), (1, 1))
     ck("shuffle is deterministic, so a run is reproducible",
        [cand_id(c) for c in order([hi], [lo], "shuffle")]
        == [cand_id(c) for c in order([hi], [lo], "shuffle")], True)
@@ -269,14 +326,20 @@ def main() -> int:
     if a.selftest:
         return selftest()
 
-    if not os.path.exists(a.shard):
-        print(f"  no shard at {a.shard}")
+    import glob
+    files = sorted(glob.glob(a.shard)) if "*" in a.shard else [a.shard]
+    files = [f for f in files if os.path.exists(f)]
+    if not files:
+        print(f"  no parquet at {a.shard}")
         return 2
     rows = load(a.shard, a.limit or None)
-    print(f"  {len(rows):,} action steps\n")
+    print(f"  {len(rows):,} action steps over {len(files)} shard(s)\n")
 
-    lab = [r for r in rows if has_text(r[1])]
-    unl = [r for r in rows if not has_text(r[1])]
+    # Split BEFORE preparing, because `has_text` reads the raw positives, then
+    # parse each subset once. Preparing the whole set twice would undo the point.
+    lab_raw = [r for r in rows if r[1] and has_text(r[1])]
+    unl_raw = [r for r in rows if r[1] and not has_text(r[1])]
+    rows, lab, unl = prepare(rows), prepare(lab_raw), prepare(unl_raw)
     f = lambda h, n: f"{h/n:6.1%} ({h}/{n})" if n else "      n/a"
 
     for how in ("dom", "shuffle"):

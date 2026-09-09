@@ -1,0 +1,11 @@
+data/test_domain-00000-of-00011-26c55c12cbbcdc8e.parquet
+data/test_domain-00001-of-00011-93dadb8d3ca8a3e9.parquet
+data/test_domain-00002-of-00011-f4d93275c87bbd81.parquet
+data/test_domain-00003-of-00011-8e9c851b71133773.parquet
+data/test_domain-00004-of-00011-d94e067efdd549d4.parquet
+data/test_domain-00005-of-00011-f1164b95bfaed9de.parquet
+data/test_domain-00006-of-00011-a903b67c9fda87e5.parquet
+data/test_domain-00007-of-00011-5b3f5bd69a725501.parquet
+data/test_domain-00008-of-00011-555923175d587f8c.parquet
+data/test_domain-00009-of-00011-8c95b9e67a3679f9.parquet
+data/test_domain-00010-of-00011-4ec618cf686bc066.parquet
