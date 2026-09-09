@@ -14,6 +14,33 @@ at all.
 picking the first element in document order scores 38.4%.** No model, no pixels,
 no reading of the task.
 
+**Five of the seven systems reported on Mind2Web Cross-Domain score at or below
+a policy that never looks at the page.** The best one beats it by 3.1 points.
+
+```
+system                      Ele.Acc   floor  vs floor  normalised
+MindAct w/ Flan-T5XL           42.1    39.0      +3.1        5.9%
+MindAct w/ Flan-T5L            39.7    39.0      +0.7        1.3%
+MindAct w/ GPT-4               37.1    45.4      -8.3      -30.3%  < top-10, 50 tasks
+MindAct w/ Flan-T5B            33.9    39.0      -5.1       -9.8%  <
+Classification (DeBERTa)       24.5    39.0     -14.5      -27.9%  <
+MindAct w/ GPT-3.5             21.6    39.0     -17.4      -33.5%  <
+Generation (Flan-T5B)          14.2    39.0     -24.8      -47.7%  <
+```
+
+Element accuracy is quoted from Table 2 of [arXiv:2306.06070v3][paper]. The floor
+and the ceiling are measured here, macro-averaged across the same 694 tasks the
+paper averages over, and each system is compared at the shortlist size it was
+actually run at: GPT-4 used top-10, where the floor is higher.
+
+**normalised** is `(score - floor) / (ceiling - floor)`, the share of genuinely
+available headroom a system captured. The ceiling is `recall@k`, since an element
+the ranker discarded is unreachable by anything downstream. At top-50 that
+headroom is 52.0 points, not 100.
+
+[paper]: https://arxiv.org/abs/2306.06070
+
+
 ```
 RANKED by the published Mind2Web cross-encoder, over 3,838 steps
 
@@ -39,6 +66,7 @@ ties on identical scores.
 ```bash
 pip install duckdb            # the only dependency
 ./fetch.sh                    # the split and the scores (~3.9 GB)
+python floor.py --xenc data/scores_all_data.pkl --compare
 python floor.py --xenc data/scores_all_data.pkl --sweep 500,100,50,10,1
 python floor.py               # the text stand-in, for comparison
 python floor.py --selftest    # the scorer, on cases with known answers
@@ -130,6 +158,13 @@ and 90.8%.
 here is produced with the screenshot deleted.
 
 ## Limitations
+
+The comparison table joins numbers this repo measured to numbers a paper
+reported, and the two have to be averaged the same way to be comparable. The
+paper macro-averages step-wise metrics across tasks; the sweep tables here
+micro-average across steps. `--compare` macro-averages to match, which moves the
+top-50 floor from 38.4% to 39.0%. Both are printed rather than one silently
+standing in for the other.
 
 No model is run anywhere in this repo, so there is no accompanying capability
 number to sit the floor beside. That is the gap worth closing next.

@@ -384,6 +384,86 @@ def score_raw(rows, policy, how="dom"):
     return score(prepare(rows), policy, how)
 
 
+# Element accuracy reported for the Cross-Domain split, which is this split.
+# Table 2 of arXiv:2306.06070v3 (Deng et al., Mind2Web, NeurIPS 2023). Quoted
+# rather than reproduced, and every row carries the shortlist size it was run
+# at, because comparing a score to a floor measured at a different k is the
+# easiest way to get this wrong.
+PUBLISHED = [
+    # (system,               Ele. Acc, top-k, note)
+    ("MindAct w/ Flan-T5XL",     42.1, 50, ""),
+    ("MindAct w/ Flan-T5L",      39.7, 50, ""),
+    ("MindAct w/ Flan-T5B",      33.9, 50, ""),
+    ("Classification (DeBERTa)", 24.5, 50, ""),
+    ("MindAct w/ GPT-3.5",       21.6, 50, ""),
+    ("MindAct w/ GPT-4",         37.1, 10, "50 tasks only, top-10"),
+    ("Generation (Flan-T5B)",    14.2, 50, ""),
+]
+
+
+def macro(rows, k):
+    """Floor and ceiling averaged per task, then across tasks.
+
+    The paper macro-averages its step-wise metrics across tasks. A floor
+    micro-averaged over steps is a different denominator, and quoting one
+    against the other is comparing two things that share a name. This returns
+    the paper's shape so the comparison is legitimate; `--sweep` keeps
+    reporting micro, and both are printed side by side.
+    """
+    import collections
+    import statistics
+
+    hit = collections.defaultdict(list)
+    rec = collections.defaultdict(list)
+    for tt, cands, gold, key in rows:
+        sl = _ranked(tt, cands, key)[:k]
+        if not sl:
+            continue
+        task = key.split("_")[0] if key else ""
+        dom = sorted(sl, key=lambda c: _nid_key(c["id"]))
+        hit[task].append(int(dom[0]["id"] in gold))
+        rec[task].append(int(any(c["id"] in gold for c in sl)))
+    f = statistics.mean(sum(v) / len(v) for v in hit.values())
+    c = statistics.mean(sum(v) / len(v) for v in rec.values())
+    return f * 100, c * 100, len(hit)
+
+
+def compare(rows):
+    """Published scores against the floor and ceiling of the setting they ran in.
+
+    This is the whole argument of the repo made concrete. A score is not a
+    capability number on its own; it is a position between what a policy with no
+    perception already gets and what the retrieval stage leaves reachable.
+
+    The normalised column is (score - floor) / (ceiling - floor): the share of
+    the actually-available headroom a system captured. Negative means it did
+    worse than not looking.
+    """
+    ks = sorted({k for _, _, k, _ in PUBLISHED})
+    fc = {k: macro(rows, k) for k in ks}
+    ntask = fc[ks[0]][2]
+    print(f"  PUBLISHED SCORES AGAINST THEIR FLOOR, macro-averaged over "
+          f"{ntask} tasks as the paper does\n")
+    for k in ks:
+        f, c, _ = fc[k]
+        print(f"  top-{k}: floor {f:.1f}  ceiling {c:.1f}  "
+              f"headroom {c - f:.1f} points")
+    print()
+    print(f"  {'system':26} {'Ele.Acc':>8} {'floor':>7} {'vs floor':>9} "
+          f"{'normalised':>11}")
+    for name, acc, k, note in sorted(PUBLISHED, key=lambda r: -r[1]):
+        f, c, _ = fc[k]
+        norm = (acc - f) / (c - f) * 100
+        flag = "  " if acc > f else " <"
+        print(f"  {name:26} {acc:>8.1f} {f:>7.1f} {acc - f:>+9.1f} "
+              f"{norm:>10.1f}%{flag}{note}")
+    below = sum(1 for _, acc, k, _ in PUBLISHED if acc <= fc[k][0])
+    print(f"\n  {below} of {len(PUBLISHED)} reported systems score at or below "
+          f"a policy that never looks at the page.")
+    print("  Ele. Acc from Table 2, arXiv:2306.06070v3. Floor and ceiling "
+          "measured here.")
+
+
 def load(path, limit=None):
     """Rows from one parquet file or a glob over the whole split.
 
@@ -546,6 +626,26 @@ def selftest() -> int:
        [c["id"] for c in _ranked(tt2, _prep([hi, lo]), "K")], ["100", "700"])
     _g["_XENC"] = {}
 
+
+    # --- macro averaging -----------------------------------------------------
+    # The published numbers are macro-averaged across tasks and this repo
+    # micro-averages across steps. Quoting one against the other compares two
+    # different denominators that share a name, so the two must not silently
+    # coincide in the tests.
+    a1 = C("10", **{"class": "passport"})
+    b1 = C("900", **{"class": "junk"})
+    # Task A: two steps, one hit one miss. Task B: one step, a hit.
+    rowsA = prepare([("passport", [a1], [b1], "A", "s1"),
+                     ("passport", [b1], [a1], "A", "s2"),
+                     ("passport", [a1], [b1], "B", "s3")])
+    f, c, n = macro(rowsA, 50)
+    ck("macro groups steps by task, not by step", n, 2)
+    # micro would be 2/3 = 66.7%; macro is (0.5 + 1.0)/2 = 75%.
+    ck("macro weights a task, not a step", round(f, 1), 75.0)
+    ck("micro over the same rows differs",
+       round(score(rowsA, pick_first, "dom", 50)[0] / 3 * 100, 1), 66.7)
+    ck("macro ceiling is recall, same grouping", round(c, 1), 100.0)
+
     print("\n  " + ("SELFTEST PASS" if ok else "SELFTEST FAIL"))
     return 0 if ok else 1
 
@@ -562,6 +662,9 @@ def main() -> int:
                     help="path to scores_all_data.pkl, the published "
                          "cross-encoder scores; without it the text stand-in "
                          "is used and every table says so")
+    ap.add_argument("--compare", action="store_true",
+                    help="published element accuracy against the floor and "
+                         "ceiling of the setting each was run in")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -627,6 +730,10 @@ def main() -> int:
                   f"{v['rank']/n:>12.1%} {v['centre']/n:>8.1%}")
         print(f"\n  first (dom) peaks at k={pk}: {pv:.1%}")
         print("  recall@k in the same table because it caps every column beside it.")
+
+    if a.compare:
+        print()
+        compare(rows)
 
     print(f"\n  text-labelled {len(lab):,} steps, no-text control {len(unl):,}")
     return 0
