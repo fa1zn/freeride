@@ -9,7 +9,8 @@ set -uo pipefail
 cd "$(dirname "$0")"
 mkdir -p data
 
-PY="${PY:-/Users/faizansyed/pam stuff/infra/.venv/bin/python}"
+# Any python with duckdb installed. Override with PY=... for a venv.
+PY="${PY:-python3}"
 BASE="https://huggingface.co/datasets/osunlp/Multimodal-Mind2Web/resolve/main"
 
 readable() {

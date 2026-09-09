@@ -33,10 +33,14 @@ RANKED, the ranker's top 50, which is where a real system acts
 document order scores 31.4%.** No model, no pixels, no reading of the task.
 
 ```bash
-./fetch.sh                    # the split, verified shard by shard
+pip install duckdb            # the only dependency
+./fetch.sh                    # the split, verified shard by shard (~3.6 GB)
 python floor.py               # the table above
 python floor.py --selftest    # the scorer, on cases with known answers
 ```
+
+No API key, no model, no GPU. The whole thing is a few minutes of CPU once the
+split is on disk.
 
 ## Ranking raises the floor, it does not remove it
 
