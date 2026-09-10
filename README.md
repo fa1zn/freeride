@@ -1,6 +1,6 @@
-# freeride
+# nonchalant
 
-**Can an agent work when nobody spells it out?**
+**Can an agent help when nobody spells it out?**
 
 The bet behind every proactive assistant is that AI should be able to operate
 without people having to communicate everything explicitly. That is a claim you
