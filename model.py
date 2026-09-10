@@ -202,7 +202,11 @@ def call(model, text, retries=4):
     }).encode()
     req = urllib.request.Request(
         f"{base}/chat/completions", data=body,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                 # urllib's default UA is refused at the edge with a 403 that
+                 # says nothing; curl with the same key succeeds. Same fix as
+                 # jobs.py in the resumes repo.
+                 "User-Agent": "nonchalant/0.1"})
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
