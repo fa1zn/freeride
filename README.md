@@ -119,6 +119,53 @@ nearly doubles the share of offers that turn out useful, and costs a quarter of
 the work saved. Past four, waiting buys nothing. That crossover is the shipping
 decision.
 
+## The third question: does a model do better?
+
+Everything above is a floor or a number quoted from the 2023 paper. `model.py`
+asks a model we run, on 300 of the same decision points, in two conditions
+one variable apart: **blind** sees the actions so far and every element on the
+page, and is not told the task. **told** sees the same and is told.
+
+Every candidate, not the top-50, because the authors' ranker scores each
+element by relevance to the task text; a blind model handed the shortlist has
+been told the task through the list. The floor is the same rule as before,
+first element in page order, on the same 300 points.
+
+```
+Llama-3.3-70B, cross-domain split, n=300
+
+                       blind     told     floor (reads nothing)
+  right element        15.3%    17.7%     19.7%   first in page order
+  right operation      72.3%    72.3%     82.7%   always CLICK
+```
+
+**A 70B model told exactly what the person wants, shown every element on the
+page, picks the right one 17.7% of the time. Picking the first element scores
+19.7%.** It loses to the floor with the instruction and without it, on the
+element and on the operation.
+
+**Being told the task is worth 2.4 points.** Whatever the model uses to choose
+an element, the goal is not much of it.
+
+**Blind, the model knows when it is guessing.** Element accuracy by its own
+confidence: 8.6% when it says 0-24, 20.1% when it says 75-100, and that top
+bucket is the only number in the table above the floor. Told, it reports high
+confidence on 295 of 300 and is wrong on 82% of them. Knowing the goal made it
+confident, not correct. That is the first evidence here that *when to speak* is
+readable from the model's own signal, which is the decision a proactive
+assistant actually has to make.
+
+Three things this does not say. It is one model, one split, 300 points. The
+all-candidates setting is harder than the paper's top-50, so these numbers do
+not sit beside the table above; `told_ranked` in `model.py` is the condition
+that does, and needs the authors' scores file. And a model that picked the
+other search box on a page with two is scored wrong, exactly as `intent.py`
+does, so these are conservative.
+
+Mind2Web is from 2023 and the model has likely seen it. If memorised
+trajectories were helping, `told` would be the condition to show it. It is at
+17.7%.
+
 ## How this was built
 
 **Nothing here approximates anything, and that turned out to matter.**
